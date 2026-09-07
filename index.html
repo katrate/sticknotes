@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div id="notes-container"></div>
+    <div id="editor-overlay" class="hidden">
+        <div id="editor-window">
+            <div id="color-picker" class="color-picker"></div>
+            <input type="text" id="edit-title" placeholder="Title">
+            <textarea id="edit-content" placeholder="Type here..."></textarea>
+            <div class="editor-footer">
+                <button class="btn btn-del" onclick="deleteNote()">Delete</button>
+                <button class="btn btn-save" onclick="save()">Save</button>
+            </div>
+        </div>
+    </div>
+    <script src="renderer.js"></script>
+</body>
+
+</html>
