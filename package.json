@@ -18,7 +18,7 @@
     "build": {
         "appId": "com.katrate.sticknotes",
         "productName": "StickNotes",
-        "publish": "never",
+
         "directories": {
             "output": "dist"
         },
