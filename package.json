@@ -1,11 +1,47 @@
 {
-    "name": "edge-notes",
+    "name": "sticknotes",
     "version": "1.0.0",
+    "description": "Stick Notes - A simple desktop notes app",
     "main": "main.js",
+    "author": "katrate",
+    "license": "MIT",
     "scripts": {
-        "start": "electron ."
+        "start": "electron .",
+        "build": "electron-builder",
+        "build:win": "electron-builder --win",
+        "build:mac": "electron-builder --mac",
+        "build:linux": "electron-builder --linux"
+    },
+    "build": {
+        "appId": "com.katrate.sticknotes",
+        "productName": "StickNotes",
+        "directories": {
+            "output": "dist"
+        },
+        "files": [
+            "main.js",
+            "renderer.js",
+            "index.html",
+            "style.css",
+            "icon.png"
+        ],
+        "win": {
+            "target": ["nsis", "portable"],
+            "icon": "icon.png"
+        },
+        "mac": {
+            "target": ["dmg", "zip"],
+            "icon": "icon.png",
+            "category": "public.app-category.productivity"
+        },
+        "linux": {
+            "target": ["AppImage", "deb"],
+            "icon": "icon.png",
+            "category": "Utility"
+        }
     },
     "devDependencies": {
-        "electron": "^28.3.3"
+        "electron": "^28.3.3",
+        "electron-builder": "^24.9.1"
     }
 }
