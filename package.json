@@ -3,7 +3,10 @@
     "version": "1.0.0",
     "description": "Stick Notes - A simple desktop notes app",
     "main": "main.js",
-    "author": "katrate",
+    "author": {
+        "name": "katrate",
+        "email": "katrate@users.noreply.github.com"
+    },
     "license": "MIT",
     "scripts": {
         "start": "electron .",
@@ -15,6 +18,7 @@
     "build": {
         "appId": "com.katrate.sticknotes",
         "productName": "StickNotes",
+        "publish": "never",
         "directories": {
             "output": "dist"
         },
