@@ -8,67 +8,102 @@ let mainWindow;
 let tray = null;
 let pendingUpdate = null;
 let fullscreenInterval = null;
-let wasOnTop = false;
+let wasOnTop = true;
+let fullscreenStableCount = 0;
+let isCurrentlyFullscreen = false;
 
 const CURRENT_VERSION = app.getVersion();
 const GITHUB_REPO = 'katrate/sticknotes';
+const UPDATE_STATE_FILE = path.join(app.getPath('userData'), 'update-state.json');
 
-function checkForUpdates() {
+function loadUpdateState() {
+    try {
+        if (fs.existsSync(UPDATE_STATE_FILE)) {
+            return JSON.parse(fs.readFileSync(UPDATE_STATE_FILE, 'utf8'));
+        }
+    } catch {}
+    return { downloadedVersion: null, downloadedPath: null };
+}
+
+function saveUpdateState(state) {
+    try {
+        fs.writeFileSync(UPDATE_STATE_FILE, JSON.stringify(state));
+    } catch {}
+}
+
+function isNewerVersion(a, b) {
+    const pa = a.split('.').map(Number);
+    const pb = b.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+        if ((pa[i] || 0) > (pb[i] || 0)) return true;
+        if ((pa[i] || 0) < (pb[i] || 0)) return false;
+    }
+    return false;
+}
+
+function fetchJSON(urlPath) {
     return new Promise((resolve) => {
-        const options = {
+        https.get({
             hostname: 'api.github.com',
-            path: `/repos/${GITHUB_REPO}/releases/latest`,
+            path: urlPath,
             headers: { 'User-Agent': 'StickNotes-App' }
-        };
-
-        https.get(options, (res) => {
+        }, (res) => {
             let data = '';
             res.on('data', (chunk) => { data += chunk; });
             res.on('end', () => {
-                try {
-                    const release = JSON.parse(data);
-                    const latestVersion = release.tag_name.replace(/^v/, '');
-                    if (isNewerVersion(latestVersion, CURRENT_VERSION)) {
-                        const platform = process.platform;
-                        let assetName = null;
-                        let downloadUrl = null;
-                        for (const asset of release.assets || []) {
-                            if (platform === 'win32' && asset.name.endsWith('.exe')) {
-                                assetName = asset.name;
-                                downloadUrl = asset.browser_download_url;
-                                break;
-                            }
-                            if (platform === 'darwin' && (asset.name.endsWith('.dmg') || asset.name.endsWith('.zip'))) {
-                                assetName = asset.name;
-                                downloadUrl = asset.browser_download_url;
-                                break;
-                            }
-                            if (platform === 'linux' && (asset.name.endsWith('.AppImage') || asset.name.endsWith('.deb'))) {
-                                assetName = asset.name;
-                                downloadUrl = asset.browser_download_url;
-                                break;
-                            }
-                        }
-                        resolve({ version: latestVersion, assetName, downloadUrl, releaseUrl: release.html_url });
-                    } else {
-                        resolve(null);
-                    }
-                } catch {
-                    resolve(null);
-                }
+                try { resolve(JSON.parse(data)); } catch { resolve(null); }
             });
         }).on('error', () => resolve(null));
     });
 }
 
-function isNewerVersion(latest, current) {
-    const l = latest.split('.').map(Number);
-    const c = current.split('.').map(Number);
-    for (let i = 0; i < 3; i++) {
-        if ((l[i] || 0) > (c[i] || 0)) return true;
-        if ((l[i] || 0) < (c[i] || 0)) return false;
-    }
-    return false;
+function checkForUpdates() {
+    return new Promise(async (resolve) => {
+        const releases = await fetchJSON(`/repos/${GITHUB_REPO}/releases`);
+        if (!Array.isArray(releases) || releases.length === 0) return resolve(null);
+
+        let bestRelease = null;
+        let bestVersion = CURRENT_VERSION;
+
+        for (const release of releases) {
+            const tagVersion = (release.tag_name || '').replace(/^v/, '');
+            if (isNewerVersion(tagVersion, bestVersion)) {
+                bestVersion = tagVersion;
+                bestRelease = release;
+            }
+        }
+
+        if (!bestRelease) return resolve(null);
+
+        const platform = process.platform;
+        let assetName = null;
+        let downloadUrl = null;
+
+        for (const asset of bestRelease.assets || []) {
+            if (platform === 'win32' && asset.name.endsWith('.exe')) {
+                assetName = asset.name;
+                downloadUrl = asset.browser_download_url;
+                break;
+            }
+            if (platform === 'darwin' && (asset.name.endsWith('.dmg') || asset.name.endsWith('.zip'))) {
+                assetName = asset.name;
+                downloadUrl = asset.browser_download_url;
+                break;
+            }
+            if (platform === 'linux' && (asset.name.endsWith('.AppImage') || asset.name.endsWith('.deb'))) {
+                assetName = asset.name;
+                downloadUrl = asset.browser_download_url;
+                break;
+            }
+        }
+
+        resolve({
+            version: bestVersion,
+            assetName,
+            downloadUrl,
+            releaseUrl: bestRelease.html_url
+        });
+    });
 }
 
 function detectFullscreen() {
@@ -76,46 +111,114 @@ function detectFullscreen() {
         if (process.platform !== 'win32') return resolve(false);
 
         const ps = [
-            'Add-Type -AssemblyName System.Windows.Forms',
-            'Add-Type -AssemblyName System.Drawing',
-            'Add-Type -TypeDefinition "',
+            'Add-Type -TypeDefinition @"',
             'using System;using System.Runtime.InteropServices;',
-            'public class Win {',
-            '  [DllImport(\\"user32.dll\\")] public static extern IntPtr GetForegroundWindow();',
-            '  [DllImport(\\"user32.dll\\")] public static extern bool GetWindowRect(IntPtr h, out RECT r);',
-            '  [DllImport(\\"user32.dll\\", CharSet=CharSet.Auto)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);',
-            '  [DllImport(\\"user32.dll\\")] public static extern bool IsZoomed(IntPtr h);',
+            'public class WinAPI {',
+            '  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+            '  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);',
+            '  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);',
+            '  [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);',
+            '  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);',
             '  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }',
-            '}"',
-            ';',
-            '$h = [Win]::GetForegroundWindow()',
-            'if ([Win]::IsZoomed($h)) {',
-            '  $r = New-Object Win+RECT',
-            '  [Win]::GetWindowRect($h, [ref]$r) | Out-Null',
-            '  $sb = New-Object System.Text.StringBuilder 256',
-            '  [Win]::GetWindowText($h, $sb, 256) | Out-Null',
+            '}',
+            '"@',
+            '$h = [WinAPI]::GetForegroundWindow()',
+            '$style = [WinAPI]::GetWindowLong($h, -16)',
+            '$hasCaption = ($style -band 0x00C00000) -ne 0',
+            'if (-not $hasCaption) {',
+            '  $r = New-Object WinAPI+RECT',
+            '  [WinAPI]::GetWindowRect($h, [ref]$r) | Out-Null',
+            '  $ww = [WinAPI]::GetSystemMetrics(0)',
+            '  $wh = [WinAPI]::GetSystemMetrics(1)',
             '  $w = $r.R - $r.L; $hh = $r.B - $r.T',
-            '  $scr = [System.Windows.Forms.Screen]::FromRectangle([System.Drawing.Rectangle]::FromLTRB($r.L,$r.T,$r.R,$r.B)).Bounds',
-            '  if ($w -ge $scr.Width -and $hh -ge $scr.Height) { exit 0 }',
+            '  if ($w -ge $ww -and $hh -ge $wh) { exit 0 }',
             '}',
             'exit 1'
-        ].join('\n');
+        ].join('`n');
 
-        const child = exec(
-            `powershell -NoProfile -STA -Command "${ps.replace(/"/g, '\\"')}"`,
+        exec(
+            `powershell -NoProfile -Command "${ps.replace(/"/g, '\\"')}"`,
             { timeout: 3000, windowsHide: true },
-            (err) => {
-                // exit 0 = fullscreen found, exit 1 = no fullscreen
-                resolve(err ? false : true);
-            }
+            (err) => resolve(err ? false : true)
         );
     });
 }
 
+function updateFullscreenState() {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+
+    detectFullscreen().then((detected) => {
+        if (detected) {
+            fullscreenStableCount++;
+            if (fullscreenStableCount >= 3 && !isCurrentlyFullscreen) {
+                isCurrentlyFullscreen = true;
+                mainWindow.setAlwaysOnTop(false);
+            }
+        } else {
+            fullscreenStableCount = 0;
+            if (isCurrentlyFullscreen) {
+                isCurrentlyFullscreen = false;
+                mainWindow.setAlwaysOnTop(true, 'screen-saver');
+            }
+        }
+    });
+}
+
+function downloadFile(url, dest, onDone, onErr) {
+    const follow = (url) => {
+        https.get(url, (res) => {
+            if (res.statusCode === 301 || res.statusCode === 302) {
+                follow(res.headers.location);
+                return;
+            }
+            const file = fs.createWriteStream(dest);
+            res.pipe(file);
+            file.on('finish', () => {
+                file.close(onDone);
+            });
+            file.on('error', (err) => {
+                fs.unlink(dest, () => {});
+                onErr(err);
+            });
+        }).on('error', (err) => {
+            fs.unlink(dest, () => {});
+            onErr(err);
+        });
+    };
+    follow(url);
+}
+
+function launchInstaller(filePath) {
+    if (process.platform === 'win32') {
+        exec(`start "" "${filePath}"`, (err) => {
+            if (err) {
+                shell.openPath(filePath);
+            }
+        });
+    } else {
+        shell.openPath(filePath);
+    }
+}
+
 function showUpdateNotification(updateInfo) {
+    const state = loadUpdateState();
+
+    if (state.downloadedVersion === updateInfo.version && state.downloadedPath && fs.existsSync(state.downloadedPath)) {
+        const notif = new Notification({
+            title: 'StickNotes Update Ready',
+            body: `v${updateInfo.version} is downloaded. Click to install.`
+        });
+        notif.on('click', () => {
+            launchInstaller(state.downloadedPath);
+            setTimeout(() => app.quit(), 1000);
+        });
+        notif.show();
+        return;
+    }
+
     const notif = new Notification({
         title: 'StickNotes Update Available',
-        body: `Version ${updateInfo.version} is available. Click to update.`,
+        body: `Version ${updateInfo.version} is available. Click to download.`,
         silent: false
     });
     notif.on('click', () => {
@@ -136,44 +239,32 @@ function downloadAndInstall(updateInfo) {
 
     const dest = path.join(app.getPath('downloads'), updateInfo.assetName);
 
+    if (fs.existsSync(dest)) {
+        new Notification({ title: 'StickNotes', body: 'Starting installer...' }).show();
+        launchInstaller(dest);
+        setTimeout(() => app.quit(), 1000);
+        return;
+    }
+
     const notif = new Notification({
         title: 'StickNotes',
-        body: `Downloading ${updateInfo.assetName}...`
+        body: `Downloading v${updateInfo.version}...`
     });
     notif.show();
 
-    const file = fs.createWriteStream(dest);
-    https.get(updateInfo.downloadUrl, (response) => {
-        if (response.statusCode === 302 || response.statusCode === 301) {
-            https.get(response.headers.location, (res2) => {
-                res2.pipe(file);
-                file.on('finish', () => {
-                    file.close();
-                    new Notification({ title: 'StickNotes', body: 'Download complete. Starting installer...' }).show();
-                    shell.openPath(dest);
-                    setTimeout(() => app.quit(), 1000);
-                });
-            }).on('error', (err) => {
-                fs.unlink(dest, () => {});
-                new Notification({ title: 'StickNotes', body: 'Download failed.' }).show();
-            });
-            return;
-        }
-        response.pipe(file);
-        file.on('finish', () => {
-            file.close();
-            new Notification({ title: 'StickNotes', body: 'Download complete. Starting installer...' }).show();
-            shell.openPath(dest);
-            setTimeout(() => app.quit(), 1000);
-        });
-    }).on('error', (err) => {
-        fs.unlink(dest, () => {});
-        new Notification({ title: 'StickNotes', body: 'Download failed.' }).show();
+    downloadFile(updateInfo.downloadUrl, dest, () => {
+        saveUpdateState({ downloadedVersion: updateInfo.version, downloadedPath: dest });
+        new Notification({ title: 'StickNotes', body: 'Download complete. Starting installer...' }).show();
+        launchInstaller(dest);
+        setTimeout(() => app.quit(), 1000);
+    }, () => {
+        new Notification({ title: 'StickNotes', body: 'Download failed. Try again.' }).show();
     });
 }
 
 function buildTrayMenu() {
     const settings = app.getLoginItemSettings();
+    const state = loadUpdateState();
     const items = [
         { label: 'Open Notes', click: () => mainWindow.show() },
         { type: 'separator' },
@@ -189,16 +280,20 @@ function buildTrayMenu() {
     ];
 
     if (pendingUpdate) {
-        items.push({
-            label: `Update to v${pendingUpdate.version}`,
-            click: () => {
-                if (pendingUpdate.downloadUrl) {
-                    downloadAndInstall(pendingUpdate);
-                } else {
-                    shell.openExternal(pendingUpdate.releaseUrl);
+        if (state.downloadedVersion === pendingUpdate.version && state.downloadedPath && fs.existsSync(state.downloadedPath)) {
+            items.push({
+                label: `Install v${pendingUpdate.version}`,
+                click: () => {
+                    launchInstaller(state.downloadedPath);
+                    setTimeout(() => app.quit(), 1000);
                 }
-            }
-        });
+            });
+        } else {
+            items.push({
+                label: `Download v${pendingUpdate.version}`,
+                click: () => downloadAndInstall(pendingUpdate)
+            });
+        }
         items.push({ type: 'separator' });
     }
 
@@ -225,33 +320,18 @@ function createWindow() {
         }
     });
 
-    // Keep behind full-screen apps on Windows by polling for fullscreen windows
-    if (process.platform === 'win32') {
-        fullscreenInterval = setInterval(() => {
-            detectFullscreen().then((isFullscreen) => {
-                if (!mainWindow || mainWindow.isDestroyed()) return;
-                if (isFullscreen && !wasOnTop) {
-                    wasOnTop = true;
-                    mainWindow.setAlwaysOnTop(false);
-                } else if (!isFullscreen && wasOnTop) {
-                    wasOnTop = false;
-                    mainWindow.setAlwaysOnTop(true, 'screen-saver');
-                }
-            });
-        }, 2000);
-    }
-
     mainWindow.loadFile('index.html');
 
-    // Click-through logic
+    if (process.platform === 'win32') {
+        fullscreenInterval = setInterval(updateFullscreenState, 2000);
+    }
+
     mainWindow.setIgnoreMouseEvents(true, { forward: true });
     ipcMain.on('set-ignore-mouse', (event, ignore) => {
         if (mainWindow) mainWindow.setIgnoreMouseEvents(ignore, { forward: true });
     });
 
-    // TRAY SETUP
     const iconPath = path.join(__dirname, 'icon.png');
-
     if (fs.existsSync(iconPath)) {
         tray = new Tray(iconPath);
         buildTrayMenu();
@@ -263,7 +343,6 @@ function createWindow() {
         console.log("WARNING: icon.png not found. Skipping System Tray setup.");
     }
 
-    // Check for updates on startup
     checkForUpdates().then((updateInfo) => {
         if (updateInfo) {
             pendingUpdate = updateInfo;
@@ -273,7 +352,6 @@ function createWindow() {
     });
 }
 
-// Enable autostart by default on first launch
 if (!fs.existsSync(path.join(app.getPath('userData'), '.autostart-configured'))) {
     app.setLoginItemSettings({ openAtLogin: true });
     fs.writeFileSync(path.join(app.getPath('userData'), '.autostart-configured'), '1');
