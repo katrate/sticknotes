@@ -6,19 +6,6 @@ let notes = JSON.parse(localStorage.getItem('sticky_db')) || [
 let activeId = null;
 const colors = ['#00d4ff', '#ff006e', '#8338ec', '#ffbe0b', '#06d6a0'];
 
-// Autostart toggle
-ipcRenderer.invoke('get-autostart').then((enabled) => {
-    document.getElementById('autostart-toggle').checked = enabled;
-});
-
-document.getElementById('autostart-toggle').addEventListener('change', (e) => {
-    ipcRenderer.send('set-autostart', e.target.checked);
-});
-
-ipcRenderer.on('autostart-changed', (event, enabled) => {
-    document.getElementById('autostart-toggle').checked = enabled;
-});
-
 function render() {
     const container = document.getElementById('notes-container');
     container.innerHTML = `
