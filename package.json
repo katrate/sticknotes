@@ -1,6 +1,6 @@
 {
     "name": "sticknotes",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "description": "Stick Notes - A simple desktop notes app",
     "main": "main.js",
     "author": {

@@ -2,10 +2,13 @@ const { app, BrowserWindow, screen, ipcMain, Tray, Menu, shell, Notification } =
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
+const { exec } = require('child_process');
 
 let mainWindow;
 let tray = null;
 let pendingUpdate = null;
+let fullscreenInterval = null;
+let wasOnTop = false;
 
 const CURRENT_VERSION = app.getVersion();
 const GITHUB_REPO = 'katrate/sticknotes';
@@ -68,6 +71,47 @@ function isNewerVersion(latest, current) {
     return false;
 }
 
+function detectFullscreen() {
+    return new Promise((resolve) => {
+        if (process.platform !== 'win32') return resolve(false);
+
+        const ps = [
+            'Add-Type -AssemblyName System.Windows.Forms',
+            'Add-Type -AssemblyName System.Drawing',
+            'Add-Type -TypeDefinition "',
+            'using System;using System.Runtime.InteropServices;',
+            'public class Win {',
+            '  [DllImport(\\"user32.dll\\")] public static extern IntPtr GetForegroundWindow();',
+            '  [DllImport(\\"user32.dll\\")] public static extern bool GetWindowRect(IntPtr h, out RECT r);',
+            '  [DllImport(\\"user32.dll\\", CharSet=CharSet.Auto)] public static extern int GetWindowText(IntPtr h, System.Text.StringBuilder s, int n);',
+            '  [DllImport(\\"user32.dll\\")] public static extern bool IsZoomed(IntPtr h);',
+            '  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }',
+            '}"',
+            ';',
+            '$h = [Win]::GetForegroundWindow()',
+            'if ([Win]::IsZoomed($h)) {',
+            '  $r = New-Object Win+RECT',
+            '  [Win]::GetWindowRect($h, [ref]$r) | Out-Null',
+            '  $sb = New-Object System.Text.StringBuilder 256',
+            '  [Win]::GetWindowText($h, $sb, 256) | Out-Null',
+            '  $w = $r.R - $r.L; $hh = $r.B - $r.T',
+            '  $scr = [System.Windows.Forms.Screen]::FromRectangle([System.Drawing.Rectangle]::FromLTRB($r.L,$r.T,$r.R,$r.B)).Bounds',
+            '  if ($w -ge $scr.Width -and $hh -ge $scr.Height) { exit 0 }',
+            '}',
+            'exit 1'
+        ].join('\n');
+
+        const child = exec(
+            `powershell -NoProfile -STA -Command "${ps.replace(/"/g, '\\"')}"`,
+            { timeout: 3000, windowsHide: true },
+            (err) => {
+                // exit 0 = fullscreen found, exit 1 = no fullscreen
+                resolve(err ? false : true);
+            }
+        );
+    });
+}
+
 function showUpdateNotification(updateInfo) {
     const notif = new Notification({
         title: 'StickNotes Update Available',
@@ -90,7 +134,6 @@ function downloadAndInstall(updateInfo) {
         return;
     }
 
-    const { dialog } = require('electron');
     const dest = path.join(app.getPath('downloads'), updateInfo.assetName);
 
     const notif = new Notification({
@@ -173,7 +216,7 @@ function createWindow() {
         y: 0,
         frame: false,
         transparent: true,
-        alwaysOnTop: process.platform === 'win32' ? ['status', 'screen-saver'] : true,
+        alwaysOnTop: process.platform === 'win32' ? 'screen-saver' : true,
         visibleOnAllWorkspaces: true,
         skipTaskbar: true,
         webPreferences: {
@@ -182,14 +225,20 @@ function createWindow() {
         }
     });
 
-    // Keep behind full-screen apps on Windows
+    // Keep behind full-screen apps on Windows by polling for fullscreen windows
     if (process.platform === 'win32') {
-        mainWindow.on('enter-full-screen', () => {
-            mainWindow.setAlwaysOnTop(false);
-        });
-        mainWindow.on('leave-full-screen', () => {
-            mainWindow.setAlwaysOnTop(true, 'status', 'screen-saver');
-        });
+        fullscreenInterval = setInterval(() => {
+            detectFullscreen().then((isFullscreen) => {
+                if (!mainWindow || mainWindow.isDestroyed()) return;
+                if (isFullscreen && !wasOnTop) {
+                    wasOnTop = true;
+                    mainWindow.setAlwaysOnTop(false);
+                } else if (!isFullscreen && wasOnTop) {
+                    wasOnTop = false;
+                    mainWindow.setAlwaysOnTop(true, 'screen-saver');
+                }
+            });
+        }, 2000);
     }
 
     mainWindow.loadFile('index.html');
@@ -234,4 +283,8 @@ app.whenReady().then(createWindow);
 
 app.on('window-all-closed', (e) => {
     e.preventDefault();
+});
+
+app.on('before-quit', () => {
+    if (fullscreenInterval) clearInterval(fullscreenInterval);
 });
